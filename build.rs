@@ -29,12 +29,8 @@ fn main() {
     let ico_path = Path::new("assets/dubsync.ico");
     let mut icon_dir = ico::IconDir::new(ico::ResourceType::Icon);
     for &size in &[16u32, 20, 24, 32, 40, 48, 64, 96, 128, 256] {
-        let resized = image::imageops::resize(
-            &master,
-            size,
-            size,
-            image::imageops::FilterType::Lanczos3,
-        );
+        let resized =
+            image::imageops::resize(&master, size, size, image::imageops::FilterType::Lanczos3);
         let icon_image = ico::IconImage::from_rgba_data(size, size, resized.into_raw());
         match ico::IconDirEntry::encode(&icon_image) {
             Ok(entry) => icon_dir.add_entry(entry),

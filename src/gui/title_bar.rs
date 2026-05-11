@@ -3,14 +3,15 @@
 //! On Windows/Linux the native chrome is hidden (`with_decorations(false)` at
 //! ViewportBuilder time) and we render close/minimize/maximize ourselves. On
 //! macOS the native title bar is hidden but the traffic lights stay visible
-//! and AppKit-rendered (`with_titlebar_shown(false)` + `with_titlebar_buttons_shown(true)`
-//! + `with_fullsize_content_view(true)`) so they look identical to other apps;
-//! we just reserve a left-side gutter for them and fill the rest with a
-//! theme-coloured strip plus the app name and theme toggles.
+//! and AppKit-rendered (via `with_titlebar_shown(false)`,
+//! `with_titlebar_buttons_shown(true)`, `with_fullsize_content_view(true)`) so
+//! they look identical to other apps; we just reserve a left-side gutter for
+//! them and fill the rest with a theme-coloured strip plus the app name and
+//! theme toggles.
 
-use eframe::egui::{self, Align, Frame, Layout, Margin, Sense, Stroke, ViewportCommand};
 #[cfg(not(target_os = "macos"))]
 use eframe::egui::Color32;
+use eframe::egui::{self, Align, Frame, Layout, Margin, Sense, Stroke, ViewportCommand};
 
 /// Title bar height. macOS gets 38px so the theme-toggle buttons (~22px) end up
 /// with ~8px top/bottom inset matching the right-side `Margin::symmetric` value;
@@ -37,9 +38,7 @@ const TRAFFIC_LIGHTS_GUTTER: f32 = 78.0;
 
 /// Render the title bar. Call from `App::update` before any other panels.
 pub fn show(ctx: &egui::Context, app_title: &str) {
-    let is_maximized = ctx
-        .input(|i| i.viewport().maximized)
-        .unwrap_or(false);
+    let is_maximized = ctx.input(|i| i.viewport().maximized).unwrap_or(false);
 
     let panel_fill = ctx.style().visuals.window_fill();
     let separator = ctx.style().visuals.widgets.noninteractive.bg_stroke;
@@ -138,7 +137,11 @@ fn draw_window_buttons(ctx: &egui::Context, ui: &mut egui::Ui, is_maximized: boo
         ctx.send_viewport_cmd(ViewportCommand::Close);
     }
 
-    let max_glyph = if is_maximized { icons::COPY } else { icons::SQUARE };
+    let max_glyph = if is_maximized {
+        icons::COPY
+    } else {
+        icons::SQUARE
+    };
     if title_button(ui, max_glyph, ButtonKind::Normal).clicked() {
         ctx.send_viewport_cmd(ViewportCommand::Maximized(!is_maximized));
     }
@@ -185,7 +188,9 @@ fn title_button(ui: &mut egui::Ui, glyph: &str, kind: ButtonKind) -> egui::Respo
         // corner; rounding would create a visible gap at the corner.
         painter.rect_filled(rect, 0.0, bg);
     }
-    let glyph_color = if matches!(kind, ButtonKind::Close) && (resp.hovered() || resp.is_pointer_button_down_on()) {
+    let glyph_color = if matches!(kind, ButtonKind::Close)
+        && (resp.hovered() || resp.is_pointer_button_down_on())
+    {
         Color32::WHITE
     } else {
         fg
