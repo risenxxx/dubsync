@@ -1,0 +1,86 @@
+[package]
+name = "dubsync"
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Sync localized dubs from a donor release onto a master video using FFT cross-correlation."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/risenxxx/dubsync"
+homepage = "https://github.com/risenxxx/dubsync"
+readme = "README.md"
+keywords = ["audio", "video", "ffmpeg", "dub", "sync"]
+categories = ["multimedia::audio", "multimedia::video", "command-line-utilities"]
+exclude = [
+    "/test",
+    "/installer",
+    "/assets/logo.png",
+    "/.github",
+    "/.vscode",
+    "/repomix-output.*",
+    "/CLAUDE.md",
+]
+build = "build.rs"
+
+[lib]
+name = "dubsync"
+path = "src/lib.rs"
+
+[[bin]]
+name = "dubsync"
+path = "src/bin/dubsync.rs"
+
+[[bin]]
+name = "dubsync-gui"
+path = "src/bin/dubsync_gui.rs"
+required-features = ["gui"]
+
+[features]
+default = ["gui"]
+gui = ["dep:eframe", "dep:egui_extras", "dep:egui-phosphor", "dep:rfd", "dep:directories", "dep:crossbeam-channel", "dep:windows", "dep:raw-window-handle"]
+
+[dependencies]
+clap = { version = "4.5", features = ["derive", "wrap_help"] }
+inquire = "0.7"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+hound = "3.5"
+rustfft = "6.2"
+rayon = "1.10"
+anyhow = "1"
+thiserror = "1"
+indicatif = "0.17"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tempfile = "3"
+
+# GUI dependencies — only pulled in when the `gui` feature is enabled.
+eframe = { version = "0.29", optional = true, default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
+egui_extras = { version = "0.29", optional = true }
+# Bundled icon font (Phosphor). egui's default fonts don't cover the Dingbats
+# block, so check/cross/etc. would render as missing-glyph squares without this.
+egui-phosphor = { version = "0.7", optional = true }
+rfd = { version = "0.15", optional = true }
+directories = { version = "5", optional = true }
+crossbeam-channel = { version = "0.5", optional = true }
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+# Generate the multi-resolution app icon from assets/logo.png at build time.
+# `image` decodes the PNG master and Lanczos3-downsamples to each target size;
+# `ico` packs them into the .ico container winresource embeds into the binaries.
+image = { version = "0.25", default-features = false, features = ["png"] }
+ico = "0.3"
+
+# Windows-only runtime dep — used at app startup to ask DWM for rounded window
+# corners (Windows 11+; silently ignored on Windows 10). Only pulled in for the
+# GUI binary on Windows targets.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = ["Win32_Foundation", "Win32_Graphics_Dwm"], optional = true }
+raw-window-handle = { version = "0.6", optional = true }
+
+[dev-dependencies]
+rand = "0.8"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

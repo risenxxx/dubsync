@@ -1,0 +1,372 @@
+name: Release
+
+# Triggers when Cargo.toml is touched on `main`. The check-version job gates the rest
+# on whether the version field actually changed (= no `v<version>` tag exists yet), so
+# unrelated Cargo.toml edits — dependency bumps, metadata tweaks — don't produce empty
+# releases. Manual dispatch is also wired up for re-running a failed release.
+on:
+  push:
+    branches: [main]
+    paths:
+      - Cargo.toml
+  workflow_dispatch:
+
+jobs:
+  check-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.read.outputs.version }}
+      should_release: ${{ steps.gate.outputs.should_release }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Read version from Cargo.toml
+        id: read
+        run: |
+          set -euo pipefail
+          VERSION=$(grep -E '^version *= *"' Cargo.toml | head -1 | cut -d'"' -f2)
+          if [ -z "$VERSION" ]; then
+            echo "::error::Could not read version from Cargo.toml" >&2
+            exit 1
+          fi
+          echo "Cargo.toml version: $VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Gate on tag existence
+        id: gate
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.read.outputs.version }}"
+          TAG="v$VERSION"
+          if git rev-parse --verify --quiet "refs/tags/$TAG" >/dev/null; then
+            echo "Tag $TAG already exists — skipping release."
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Tag $TAG does not exist — proceeding to build."
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: check-version
+    if: needs.check-version.outputs.should_release == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Primary distribution target: Windows. Bundles ffmpeg + ffprobe + rubberband
+          # so users don't need to install anything extra to use --smooth-gaps.
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+            ffmpeg_url: https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-lgpl.zip
+            ffmpeg_archive: zip
+            rubberband_url: https://breakfastquay.com/files/releases/rubberband-4.0.0-gpl-executable-windows.zip
+          # Secondary: Linux. Same bundling, tar.gz format.
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+            ffmpeg_url: https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-lgpl.tar.xz
+            ffmpeg_archive: tar.xz
+          # macOS Apple Silicon. Bundles ffmpeg + ffprobe + rubberband from
+          # Homebrew via dylibbundler, ad-hoc signs everything (required on
+          # arm64), produces an unsigned .dmg. Users pass System Settings →
+          # Privacy & Security → Open Anyway on first launch.
+          - target: aarch64-apple-darwin
+            runner: macos-14
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      # ─── Bundle ffmpeg ──────────────────────────────────────────────────────
+      # BtbN's LGPL flavour is used so we don't pull GPL components (x264/x265).
+      # We don't decode video and we use `-c copy` for remux, so LGPL is sufficient
+      # for every codec we touch (AC3, EAC3, AAC, FLAC, PCM, MKV container).
+
+      - name: Download and extract ffmpeg (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $url = "${{ matrix.ffmpeg_url }}"
+          Invoke-WebRequest -Uri $url -OutFile "ffmpeg-pkg.zip"
+          Expand-Archive "ffmpeg-pkg.zip" -DestinationPath "ffmpeg-pkg"
+          $bin = Get-ChildItem -Path "ffmpeg-pkg" -Recurse -Filter "ffmpeg.exe" | Select-Object -First 1
+          if (-not $bin) { throw "ffmpeg.exe not found in BtbN archive" }
+          Copy-Item $bin.FullName "ffmpeg.exe"
+          $bin = Get-ChildItem -Path "ffmpeg-pkg" -Recurse -Filter "ffprobe.exe" | Select-Object -First 1
+          if (-not $bin) { throw "ffprobe.exe not found in BtbN archive" }
+          Copy-Item $bin.FullName "ffprobe.exe"
+          $license = Get-ChildItem -Path "ffmpeg-pkg" -Recurse -Filter "LICENSE.txt" | Select-Object -First 1
+          if ($license) { Copy-Item $license.FullName "FFMPEG-LICENSE.txt" }
+
+      - name: Download and extract ffmpeg (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL -o ffmpeg-pkg.tar.xz "${{ matrix.ffmpeg_url }}"
+          mkdir -p ffmpeg-pkg
+          tar -xJf ffmpeg-pkg.tar.xz -C ffmpeg-pkg --strip-components=1
+          cp ffmpeg-pkg/bin/ffmpeg ./ffmpeg
+          cp ffmpeg-pkg/bin/ffprobe ./ffprobe
+          chmod +x ffmpeg ffprobe
+          if [ -f ffmpeg-pkg/LICENSE.txt ]; then
+            cp ffmpeg-pkg/LICENSE.txt FFMPEG-LICENSE.txt
+          fi
+
+      # BtbN doesn't ship macOS builds — we install ffmpeg + rubberband from
+      # Homebrew (pre-installed on macos-14 runners) and let dylibbundler
+      # collect every dylib dependency next to the binaries inside the .app.
+      - name: Install ffmpeg + rubberband + dylibbundler (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew update
+          brew install ffmpeg rubberband dylibbundler
+          # Stage license texts at the repo root so the .app picks them up.
+          curl -fsSL -o FFMPEG-LICENSE.txt \
+            https://raw.githubusercontent.com/FFmpeg/FFmpeg/master/COPYING.LGPLv2.1 \
+            || true
+          curl -fsSL -o RUBBERBAND-LICENSE.txt \
+            https://raw.githubusercontent.com/breakfastquay/rubberband/v4.0.0/COPYING.txt \
+            || true
+
+      - name: Smoke-test ffmpeg
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            ./ffmpeg.exe -version | head -3
+            ./ffprobe.exe -version | head -3
+          elif [[ "${{ runner.os }}" == "macOS" ]]; then
+            "$(brew --prefix ffmpeg)/bin/ffmpeg" -version | head -3
+            "$(brew --prefix ffmpeg)/bin/ffprobe" -version | head -3
+          else
+            ./ffmpeg -version | head -3
+            ./ffprobe -version | head -3
+          fi
+
+      # ─── Bundle rubberband ──────────────────────────────────────────────────
+      # Used by the optional --smooth-gaps splice path. License is GPL-2.0+; we
+      # ship the COPYING.txt as RUBBERBAND-LICENSE.txt alongside the binary.
+      # Subprocess invocation is "mere aggregation" so dubsync's own MIT-OR-Apache
+      # licensing is unaffected.
+
+      - name: Download and extract rubberband (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $url = "${{ matrix.rubberband_url }}"
+          Invoke-WebRequest -Uri $url -OutFile "rubberband-pkg.zip"
+          Expand-Archive "rubberband-pkg.zip" -DestinationPath "rubberband-pkg"
+          $rb = Get-ChildItem -Path "rubberband-pkg" -Recurse -Filter "rubberband.exe" | Select-Object -First 1
+          if (-not $rb) { throw "rubberband.exe not found in archive" }
+          Copy-Item $rb.FullName "rubberband.exe"
+          # rubberband.exe links against sndfile.dll dynamically — bundle it next door.
+          $sf = Get-ChildItem -Path "rubberband-pkg" -Recurse -Filter "sndfile.dll" | Select-Object -First 1
+          if (-not $sf) { throw "sndfile.dll not found in archive" }
+          Copy-Item $sf.FullName "sndfile.dll"
+          $copying = Get-ChildItem -Path "rubberband-pkg" -Recurse -Filter "COPYING.txt" | Select-Object -First 1
+          if ($copying) { Copy-Item $copying.FullName "RUBBERBAND-LICENSE.txt" }
+
+      - name: Install rubberband (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y rubberband-cli
+          cp "$(command -v rubberband)" ./rubberband
+          chmod +x ./rubberband
+          # Pull the upstream GPL text from the source so users have it next to the
+          # binary. The Debian package puts a stub at /usr/share/doc/rubberband-cli;
+          # we fetch the canonical COPYING from the upstream repo for completeness.
+          curl -fsSL -o RUBBERBAND-LICENSE.txt \
+            https://raw.githubusercontent.com/breakfastquay/rubberband/v4.0.0/COPYING.txt \
+            || cp /usr/share/doc/rubberband-cli/copyright RUBBERBAND-LICENSE.txt
+
+      - name: Smoke-test rubberband
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            ./rubberband.exe --version 2>&1 | head -3 || ./rubberband.exe --help 2>&1 | head -3
+          elif [[ "${{ runner.os }}" == "macOS" ]]; then
+            "$(brew --prefix rubberband)/bin/rubberband" --version 2>&1 | head -3 \
+              || "$(brew --prefix rubberband)/bin/rubberband" --help 2>&1 | head -3
+          else
+            ./rubberband --version 2>&1 | head -3 || ./rubberband --help 2>&1 | head -3
+          fi
+
+      # ─── Package ────────────────────────────────────────────────────────────
+
+      - name: Package archive (Windows)
+        if: runner.os == 'Windows'
+        id: package_windows
+        shell: pwsh
+        run: |
+          $version = "${{ needs.check-version.outputs.version }}"
+          $target  = "${{ matrix.target }}"
+          $archive = "dubsync-v$version-$target.zip"
+          New-Item -ItemType Directory -Path "stage" -Force | Out-Null
+          Copy-Item "target\$target\release\dubsync.exe"     "stage\"
+          Copy-Item "target\$target\release\dubsync-gui.exe" "stage\"
+          Copy-Item "ffmpeg.exe"     "stage\"
+          Copy-Item "ffprobe.exe"    "stage\"
+          Copy-Item "rubberband.exe" "stage\"
+          Copy-Item "sndfile.dll"    "stage\"
+          if (Test-Path "README.md")             { Copy-Item "README.md" "stage\" }
+          if (Test-Path "FFMPEG-LICENSE.txt")    { Copy-Item "FFMPEG-LICENSE.txt" "stage\" }
+          if (Test-Path "RUBBERBAND-LICENSE.txt"){ Copy-Item "RUBBERBAND-LICENSE.txt" "stage\" }
+          Compress-Archive -Path "stage\*" -DestinationPath $archive -Force
+          "archive=$archive" | Out-File -Append $env:GITHUB_OUTPUT
+
+      # Build the Inno Setup installer alongside the portable .zip. The .iss script
+      # picks up dubsync.exe, dubsync-gui.exe, ffmpeg.exe, ffprobe.exe, and the
+      # license/README from the locations populated above. Output:
+      #   target\installer\dubsync-setup-vX.Y.Z.exe
+      - name: Install Inno Setup
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: choco install innosetup --no-progress -y
+
+      - name: Stage installer inputs (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # The .iss expects ..\target\release\*.exe (target-triple-agnostic). Copy
+          # the matrix-built binaries into target\release so paths line up.
+          $target = "${{ matrix.target }}"
+          New-Item -ItemType Directory -Path "target\release" -Force | Out-Null
+          Copy-Item "target\$target\release\dubsync.exe"     "target\release\" -Force
+          Copy-Item "target\$target\release\dubsync-gui.exe" "target\release\" -Force
+
+      - name: Compile Inno Setup installer (Windows)
+        if: runner.os == 'Windows'
+        id: package_installer
+        shell: pwsh
+        run: |
+          $version = "${{ needs.check-version.outputs.version }}"
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DMyAppVersion="$version" installer\dubsync.iss
+          $installer = "target\installer\dubsync-setup-v$version.exe"
+          if (-not (Test-Path $installer)) { throw "installer not produced at $installer" }
+          Copy-Item $installer "."
+          "installer=dubsync-setup-v$version.exe" | Out-File -Append $env:GITHUB_OUTPUT
+
+      - name: Package archive (Linux)
+        if: runner.os == 'Linux'
+        id: package_linux
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ needs.check-version.outputs.version }}"
+          TARGET="${{ matrix.target }}"
+          ARCHIVE="dubsync-v${VERSION}-${TARGET}.tar.gz"
+          STAGE=$(mktemp -d)
+          cp "target/${TARGET}/release/dubsync" "$STAGE/"
+          cp ffmpeg ffprobe rubberband "$STAGE/"
+          [ -f README.md ]               && cp README.md "$STAGE/"
+          [ -f FFMPEG-LICENSE.txt ]      && cp FFMPEG-LICENSE.txt "$STAGE/"
+          [ -f RUBBERBAND-LICENSE.txt ]  && cp RUBBERBAND-LICENSE.txt "$STAGE/"
+          tar -czf "$ARCHIVE" -C "$STAGE" .
+          ls -la "$ARCHIVE"
+          echo "archive=$ARCHIVE" >> "$GITHUB_OUTPUT"
+
+      # Build Dubsync.app, bundle Homebrew dylibs via dylibbundler, ad-hoc sign
+      # everything (mandatory on Apple Silicon), wrap in a UDZO .dmg with a
+      # /Applications symlink. No Developer ID; users go through Privacy &
+      # Security on first launch.
+      - name: Package .app + .dmg (macOS)
+        if: runner.os == 'macOS'
+        id: package_macos
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ needs.check-version.outputs.version }}"
+          TARGET="${{ matrix.target }}"
+          installer/macos/build-app.sh \
+            --version "$VERSION" \
+            --target  "$TARGET"
+          DMG="dubsync-v${VERSION}-${TARGET}.dmg"
+          cp "target/installer/$DMG" "$DMG"
+          ls -la "$DMG"
+          echo "archive=$DMG" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dubsync-${{ matrix.target }}
+          path: |
+            dubsync-v*.zip
+            dubsync-v*.tar.gz
+            dubsync-v*.dmg
+            dubsync-setup-v*.exe
+          retention-days: 7
+          if-no-files-found: error
+
+  release:
+    needs: [check-version, build]
+    if: needs.check-version.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Flatten artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          find artifacts \( -name '*.zip' -o -name '*.tar.gz' -o -name '*.exe' -o -name '*.dmg' \) -exec mv {} release/ \;
+          ls -la release
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ needs.check-version.outputs.version }}"
+          TAG="v$VERSION"
+          gh release create "$TAG" \
+            --title "dubsync $TAG" \
+            --notes "Automated release for $TAG.
+
+          **Windows users**: download \`dubsync-setup-vX.Y.Z.exe\` for the installer
+          (Start-Menu shortcut, optional desktop icon) — or \`dubsync-vX.Y.Z-x86_64-pc-windows-msvc.zip\` for a portable copy.
+
+          **macOS users (Apple Silicon)**: download \`dubsync-vX.Y.Z-aarch64-apple-darwin.dmg\`,
+          drag \`Dubsync.app\` into Applications. The app is **not signed with a Developer ID**:
+          on first launch macOS Gatekeeper will block it. Open System Settings → Privacy &
+          Security, scroll down, click **Open Anyway** next to the dubsync entry, confirm
+          with Touch ID. Subsequent launches work normally.
+
+          **Linux users**: download \`dubsync-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz\` (CLI only;
+          GUI builds locally with \`cargo build --release --features gui\`).
+
+          Every archive bundles:
+          - \`ffmpeg\` + \`ffprobe\` (BtbN LGPL build on Windows/Linux, Homebrew on macOS) — required.
+          - \`rubberband\` — used by the optional \`--smooth-gaps\` splice path. GPL-2.0+, license shipped as \`RUBBERBAND-LICENSE.txt\`.
+
+          Built from \`${GITHUB_SHA}\`." \
+            --target "$GITHUB_SHA" \
+            release/*
