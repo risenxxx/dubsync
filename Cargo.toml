@@ -1,6 +1,6 @@
 [package]
 name = "dubsync"
-version = "1.0.1"
+version = "1.0.2"
 edition = "2021"
 rust-version = "1.75"
 description = "Sync localized dubs from a donor release onto a master video using FFT cross-correlation."
@@ -36,7 +36,7 @@ required-features = ["gui"]
 
 [features]
 default = ["gui"]
-gui = ["dep:eframe", "dep:egui_extras", "dep:egui-phosphor", "dep:rfd", "dep:directories", "dep:crossbeam-channel", "dep:windows", "dep:raw-window-handle"]
+gui = ["dep:eframe", "dep:egui_extras", "dep:egui-phosphor", "dep:rfd", "dep:directories", "dep:crossbeam-channel", "dep:image", "dep:windows", "dep:raw-window-handle"]
 
 [dependencies]
 clap = { version = "4.5", features = ["derive", "wrap_help"] }
@@ -62,6 +62,12 @@ egui-phosphor = { version = "0.7", optional = true }
 rfd = { version = "0.15", optional = true }
 directories = { version = "5", optional = true }
 crossbeam-channel = { version = "0.5", optional = true }
+# Runtime PNG decoder for the window icon (`with_icon` on the ViewportBuilder).
+# winresource handles the .exe's embedded resource icon used by Explorer / Start
+# Menu / pinned-taskbar shortcuts, but a *running* window draws its taskbar /
+# Alt-Tab / preview icon from the HICON eframe sets at startup — so we have to
+# decode logo.png and feed it in separately.
+image = { version = "0.25", optional = true, default-features = false, features = ["png"] }
 
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"

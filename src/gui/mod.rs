@@ -7,6 +7,7 @@ mod options_panel;
 pub mod persistence;
 pub mod run_controller;
 mod title_bar;
+mod window_resize;
 
 use crate::cli::{DubCodec, FpsMode, RunConfig};
 use chat_panel::ChatPanel;
@@ -192,6 +193,10 @@ impl eframe::App for App {
         // Custom title bar — must come first so it claims the topmost strip
         // before any other panel layout is computed.
         title_bar::show(ctx, APP_TITLE);
+
+        // Edge / corner resize handles. Order::Foreground keeps them above the
+        // title bar's top strip so the top-edge resize works.
+        window_resize::show(ctx, self.state.window_maximized.unwrap_or(false));
 
         // Right side panel: pipeline progress (chat-style cards) + collapsible
         // raw tracing log anchored at the bottom. Resizable so the user can
@@ -790,6 +795,10 @@ pub fn window_options(state: &PersistedState) -> eframe::NativeOptions {
         .with_inner_size(initial)
         .with_min_inner_size(MIN_WINDOW_SIZE);
 
+    if let Some(icon) = load_app_icon() {
+        viewport = viewport.with_icon(icon);
+    }
+
     #[cfg(target_os = "macos")]
     {
         viewport = viewport
@@ -812,4 +821,22 @@ pub fn window_options(state: &PersistedState) -> eframe::NativeOptions {
         viewport,
         ..Default::default()
     }
+}
+
+/// Decode the bundled PNG master into an `egui::IconData` for the window's
+/// runtime HICON. winresource handles the .exe-embedded icon Explorer / pinned
+/// shortcuts use, but a *running* window draws its taskbar / Alt-Tab / preview
+/// icon from whatever eframe passes to `WM_SETICON` — so we have to load the
+/// PNG separately and feed it through `with_icon`. Returns None if the PNG is
+/// unreadable; the window then falls back to the default egui icon (which is
+/// what we were getting before this helper existed).
+fn load_app_icon() -> Option<std::sync::Arc<egui::IconData>> {
+    const PNG: &[u8] = include_bytes!("../../assets/logo.png");
+    let img = image::load_from_memory(PNG).ok()?.into_rgba8();
+    let (width, height) = img.dimensions();
+    Some(std::sync::Arc::new(egui::IconData {
+        rgba: img.into_raw(),
+        width,
+        height,
+    }))
 }
