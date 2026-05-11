@@ -414,7 +414,7 @@ A full pipeline run on a 50-second sample takes ~1–2 seconds vs ~30 seconds fo
 - **Variable drift / clock-rate mismatch within a segment** — offsets are modelled
   as piecewise constant. FPS-normalize handles a global ratio mismatch up front,
   but per-segment continuous drift (bad encodes with floating sample clock, etc.)
-  is not corrected. Tracked in ROADMAP as item #4.
+  is not corrected.
 - **Re-encoding the master video** — `-c:v copy` always.
 - **Image-based subtitles** (PGS / DVD-SUB / DVB-SUB) — text-based subs (SRT /
   ASS / WebVTT) are extracted, time-shifted, and muxed; image-based codecs are
