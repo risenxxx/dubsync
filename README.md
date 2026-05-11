@@ -23,6 +23,10 @@ scene transition), with optional ambient gap-filling via the `rubberband` time-
 stretcher when the dub itself has continuous music or room-tone you don't want
 interrupted.
 
+<p align="center">
+  <img src="assets/screenshot.png" alt="dubsync running on macOS" width="820">
+</p>
+
 ## Installation
 
 ### From release (recommended)

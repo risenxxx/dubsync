@@ -99,24 +99,37 @@ sed "s/__VERSION__/$VERSION/g" \
     "$REPO_ROOT/installer/macos/Info.plist.template" \
     > "$APP_DIR/Contents/Info.plist"
 
-if [[ -f assets/logo.png ]]; then
-    echo "==> Generating .icns from assets/logo.png"
+# macOS icon master: prefer `logo-macos.png` (drawn with the ~10% transparent
+# inset Apple's HIG requires so the squircle sits at the same visual size as
+# native apps in the Dock) and fall back to the shared `logo.png` when no
+# macOS-specific master exists. Windows uses a tighter squircle, so the two
+# masters intentionally diverge.
+if [[ -f assets/logo-macos.png ]]; then
+    LOGO_SRC="assets/logo-macos.png"
+elif [[ -f assets/logo.png ]]; then
+    LOGO_SRC="assets/logo.png"
+else
+    LOGO_SRC=""
+fi
+
+if [[ -n "$LOGO_SRC" ]]; then
+    echo "==> Generating .icns from $LOGO_SRC"
     # Apple's iconutil expects a .iconset directory with the canonical PNG
     # names. sips ships with macOS, so no extra installs are needed.
     ICONSET_PARENT="$(mktemp -d)"
     ICONSET_DIR="$ICONSET_PARENT/dubsync.iconset"
     mkdir -p "$ICONSET_DIR"
     for size in 16 32 128 256 512; do
-        sips -z "$size" "$size" assets/logo.png \
+        sips -z "$size" "$size" "$LOGO_SRC" \
             --out "$ICONSET_DIR/icon_${size}x${size}.png" >/dev/null
         retina=$((size * 2))
-        sips -z "$retina" "$retina" assets/logo.png \
+        sips -z "$retina" "$retina" "$LOGO_SRC" \
             --out "$ICONSET_DIR/icon_${size}x${size}@2x.png" >/dev/null
     done
     iconutil -c icns "$ICONSET_DIR" -o "$APP_RES/dubsync.icns"
     rm -rf "$ICONSET_PARENT"
 else
-    echo "==> Note: assets/logo.png not present — using default app icon"
+    echo "==> Note: neither assets/logo-macos.png nor assets/logo.png present — using default app icon"
     # Drop CFBundleIconFile so Finder doesn't render a generic broken icon.
     /usr/libexec/PlistBuddy -c "Delete :CFBundleIconFile" "$APP_DIR/Contents/Info.plist" 2>/dev/null || true
 fi

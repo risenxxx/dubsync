@@ -1,6 +1,6 @@
 [package]
 name = "dubsync"
-version = "1.0.2"
+version = "1.0.3"
 edition = "2021"
 rust-version = "1.75"
 description = "Sync localized dubs from a donor release onto a master video using FFT cross-correlation."
@@ -13,7 +13,12 @@ categories = ["multimedia::audio", "multimedia::video", "command-line-utilities"
 exclude = [
     "/test",
     "/installer",
-    "/assets/logo.png",
+    # `logo.png` IS shipped — src/gui/mod.rs `include_bytes!`s it for the
+    # runtime window icon, so excluding it would break `cargo install`.
+    # The macOS-specific master and screenshots are local-only.
+    "/assets/logo-macos.png",
+    "/assets/logo-512.png",
+    "/assets/screenshot.png",
     "/.github",
     "/.vscode",
     "/repomix-output.*",
