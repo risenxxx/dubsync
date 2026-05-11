@@ -9,10 +9,10 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/risenxxx/dubsync/releases/latest"><img src="https://img.shields.io/github/v/release/risenxxx/dubsync?style=flat-square&color=blue" alt="Latest release"></a>
-  <a href="https://github.com/risenxxx/dubsync/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/risenxxx/dubsync/ci.yml?branch=main&style=flat-square&label=CI" alt="CI"></a>
-  <img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue?style=flat-square" alt="License">
-  <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey?style=flat-square" alt="Platforms">
+  <a href="https://github.com/risenxxx/dubsync/releases/latest"><img src="https://img.shields.io/github/v/release/risenxxx/dubsync?style=flat&color=blue" alt="Latest release"></a>
+  <a href="https://github.com/risenxxx/dubsync/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/risenxxx/dubsync/ci.yml?branch=main&style=flat&label=CI" alt="CI"></a>
+  <img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue?style=flat" alt="License">
+  <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey?style=flat" alt="Platforms">
 </p>
 
 Both releases must share an "anchor" track in the same language (typically English).
