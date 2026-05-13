@@ -52,15 +52,26 @@ pub struct SpliceConfig {
     /// Optional gap-filling — replace the literal silent gap at each splice with a
     /// time-stretched copy of the neighbouring dub audio (via `rubberband`). Speech
     /// is never stretched: if the neighbour buffer is dominated by speech the gap
-    /// stays as silence. Default OFF — opt-in feature.
+    /// stays as silence. Default ON.
     pub smooth_gaps: bool,
     /// Length of dub audio sampled before AND after each gap as the stretch source.
     /// Wider = more material to stretch (less artefact), but more risk of catching
-    /// dialog (which forces fallback to silence). Default 0.5 s.
+    /// dialog (which forces fallback to silence). Default 1.0 s.
     pub gap_fill_margin_s: f32,
     /// Above this dBFS level a neighbour buffer is treated as speech and the gap
     /// stays at silence. RMS+ZCR fallback only; ignored if Silero VAD is in use.
     pub speech_db: f32,
+    /// Hard cap on `target / source` ratio for each independent pre/post stretch.
+    /// Below the cap the stretched buffer can extend up to `gap_s/2` into the gap
+    /// from its side; above the cap residual silence remains in the middle.
+    /// Default 1.2 — inaudible on ambient/music; 1.5+ starts to drift on melodic
+    /// content. Values < 1.0 are nonsensical and treated as 1.0.
+    pub gap_fill_max_ratio: f32,
+    /// Length of the soft fade-out (at end of stretched_pre) and fade-in (at start
+    /// of stretched_post) used when the ratio cap leaves a residual silence in the
+    /// middle of the gap. Wider = gentler transition into silence, less "hard cut"
+    /// feel. Default 100 ms. Range [0, 500] — 0 reproduces the old hard-cut edge.
+    pub gap_fill_silence_fade_ms: u32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -522,11 +533,19 @@ fn render(
     out
 }
 
-/// Optional gap-fill pass. For every interior boundary in `segments`, if there's a
-/// real gap between `segs[i].master_end_s` and `segs[i+1].master_start_s`, sample
-/// the donor neighbours, classify them with VAD, and (if neither is dominated by
-/// speech) replace the silent gap with a rubberband-stretched copy of the neighbour
-/// material. Errors are logged but never fatal — the gap simply stays as silence.
+/// Optional gap-fill pass. For every interior boundary with a real master-time gap,
+/// independently stretch the pre-gap and post-gap donor margins so each side
+/// extends into the gap from its edge. The two stretched buffers either meet at the
+/// midpoint (full coverage) or leave a residual silence with soft fade-in/out
+/// transitions. Speech neighbours are never touched — the gap stays as literal
+/// silence so lip-sync is preserved. Errors are logged but never fatal.
+///
+/// Key contrast with the older concat-source design: each stretched buffer covers a
+/// *single contiguous* donor region (the one segs[i] / segs[i+1] would have played
+/// at full speed in that location), and it **replaces** the corresponding margin
+/// audio in `out[]` rather than adding to it. The listener never hears the same
+/// donor sample twice — fixes the "looped end of phrase" artefact users reported on
+/// the previous concat-then-stretch path.
 #[allow(clippy::too_many_arguments)]
 fn fill_gaps(
     out: &mut [f32],
@@ -545,12 +564,15 @@ fn fill_gaps(
     }
     let sr = pcm.sample_rate() as f64;
     let channels = pcm.channels();
-    let xfade = (crossfade_s(cfg) * sr).round() as usize;
+    let xfade_s = crossfade_s(cfg);
+    let xfade_n = (xfade_s * sr).round() as usize;
     let margin_s = cfg.gap_fill_margin_s.max(0.0) as f64;
     if margin_s <= 0.0 {
         return;
     }
-    let margin_frames = (margin_s * sr).round() as usize;
+    let max_ratio = cfg.gap_fill_max_ratio.max(1.0) as f64;
+    let silence_fade_n = ((cfg.gap_fill_silence_fade_ms as f64 / 1000.0) * sr).round() as usize;
+    let total_out_frames = out.len() / channels;
 
     for i in 0..segments.len() - 1 {
         let gap_start_s = segments[i].master_end_s;
@@ -560,19 +582,39 @@ fn fill_gaps(
             continue; // no real gap (HardCut overlap or collapsed boundary)
         }
 
+        // Per-side margin is capped by the segment's own master-time length minus its
+        // own fade-in/out zone. Without this, a short segment can have its head/tail
+        // overwritten by the gap-fill, corrupting the splice from the previous/next
+        // boundary. `(seg_len - xfade)` keeps the fade-in/out regions of the segment
+        // intact for their own crossfades.
+        let segs_i_master_s = segments[i].master_end_s - segments[i].master_start_s;
+        let segs_ip1_master_s = segments[i + 1].master_end_s - segments[i + 1].master_start_s;
+        let margin_pre_s = margin_s.min((segs_i_master_s - xfade_s).max(0.0));
+        let margin_post_s = margin_s.min((segs_ip1_master_s - xfade_s).max(0.0));
+        if margin_pre_s <= 0.0 || margin_post_s <= 0.0 {
+            tracing::info!(
+                track = track_id,
+                boundary = i,
+                "gap-fill skipped: adjacent segment shorter than crossfade — no margin available"
+            );
+            continue;
+        }
+        let margin_pre_frames = (margin_pre_s * sr).round() as usize;
+        let margin_post_frames = (margin_post_s * sr).round() as usize;
+
         // Donor frames either side of the gap. The pre-gap donor position is the last
         // sample played by segs[i] (master_end + offset_a); the post-gap position is
         // the first sample played by segs[i+1] (master_start + offset_b).
         let pre_donor_end = ((gap_start_s + segments[i].donor_offset_s) * sr).round() as i64;
         let post_donor_start = ((gap_end_s + segments[i + 1].donor_offset_s) * sr).round() as i64;
 
-        let pre_donor_lo = (pre_donor_end - margin_frames as i64).max(0) as usize;
+        let pre_donor_lo = (pre_donor_end - margin_pre_frames as i64).max(0) as usize;
         let pre_donor_hi = pre_donor_end.max(0) as usize;
         let post_donor_lo = post_donor_start.max(0) as usize;
-        let post_donor_hi = (post_donor_start + margin_frames as i64).max(0) as usize;
-        let total_frames = pcm.frames();
-        let pre_donor_hi = pre_donor_hi.min(total_frames);
-        let post_donor_hi = post_donor_hi.min(total_frames);
+        let post_donor_hi = (post_donor_start + margin_post_frames as i64).max(0) as usize;
+        let total_donor = pcm.frames();
+        let pre_donor_hi = pre_donor_hi.min(total_donor);
+        let post_donor_hi = post_donor_hi.min(total_donor);
 
         if pre_donor_hi <= pre_donor_lo || post_donor_hi <= post_donor_lo {
             tracing::info!(
@@ -618,21 +660,26 @@ fn fill_gaps(
             continue;
         }
 
-        // Build the stretch source by concatenating pre + post neighbour samples.
-        // Total source length = pre_len + post_len frames; target length covers the
-        // gap plus xfade headroom on each side so we can crossfade into segs.
-        let pre_frames = pre_donor_hi - pre_donor_lo;
-        let post_frames = post_donor_hi - post_donor_lo;
-        let mut source = Vec::with_capacity((pre_frames + post_frames) * channels);
-        source.extend_from_slice(pre_slice);
-        source.extend_from_slice(post_slice);
+        // ── Geometry: how far each side extends into the gap ────────────────────
+        //
+        // Each side extends by min(gap/2, src_len * (R - 1)) seconds. Source lengths
+        // can differ from `margin_s` if the donor was clamped to file bounds — that's
+        // OK, we compute pre/post independently.
+        let src_pre_n = pre_donor_hi - pre_donor_lo;
+        let src_post_n = post_donor_hi - post_donor_lo;
+        let src_pre_s = src_pre_n as f64 / sr;
+        let src_post_s = src_post_n as f64 / sr;
+        let half_gap_s = gap_s * 0.5;
+        let ext_pre_s = half_gap_s.min(src_pre_s * (max_ratio - 1.0));
+        let ext_post_s = half_gap_s.min(src_post_s * (max_ratio - 1.0));
+        let target_pre_s = src_pre_s + ext_pre_s;
+        let target_post_s = src_post_s + ext_post_s;
 
-        let target_duration_s = gap_s + 2.0 * crossfade_s(cfg);
-        let stretched = match stretch::stretch_to_duration(
-            &source,
+        let stretched_pre = match stretch::stretch_to_duration(
+            pre_slice,
             channels as u16,
             pcm.sample_rate(),
-            target_duration_s,
+            target_pre_s,
             workspace,
         ) {
             Ok(v) => v,
@@ -641,47 +688,179 @@ fn fill_gaps(
                     track = track_id,
                     boundary = i,
                     error = %e,
-                    "gap-fill: rubberband failed — leaving silence"
+                    "gap-fill: pre-side rubberband failed — leaving silence"
                 );
                 continue;
             }
         };
+        let stretched_post = match stretch::stretch_to_duration(
+            post_slice,
+            channels as u16,
+            pcm.sample_rate(),
+            target_post_s,
+            workspace,
+        ) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(
+                    track = track_id,
+                    boundary = i,
+                    error = %e,
+                    "gap-fill: post-side rubberband failed — leaving silence"
+                );
+                continue;
+            }
+        };
+        // Stretch lengths may differ from target by a few frames; trust the actual
+        // buffer length so the mix-buffer offsets stay consistent.
+        let stretched_pre_n = stretched_pre.len() / channels;
+        let stretched_post_n = stretched_post.len() / channels;
 
-        // Place the stretched buffer with crossfade headroom on each side. Leading
-        // xfade overlaps segs[i]'s rendered fade-out (which is already ramping
-        // 1→0), and trailing xfade overlaps segs[i+1]'s rendered fade-in.
-        let zone_start_s = gap_start_s - crossfade_s(cfg);
-        let zone_start = (zone_start_s * sr).round() as i64;
-        let zone_frames = stretched.len() / channels;
+        // ── Mix-buffer construction ────────────────────────────────────────────
+        //
+        // Zone in master time: [gap_start - src_pre_s, gap_end + src_post_s]. We
+        // overwrite this entire window in `out[]`. `mix` is the replacement content.
+        let zone_n = ((gap_s + src_pre_s + src_post_s) * sr).round() as usize;
+        let mut mix = vec![0.0_f32; zone_n * channels];
+
+        let pre_end = stretched_pre_n.min(zone_n);
+        let post_start = zone_n.saturating_sub(stretched_post_n);
+        // Coverage check: do the two stretched buffers meet/overlap?
+        let meets = pre_end + stretched_post_n >= zone_n;
+
+        // Place stretched_pre at the front. We may apply silence-fade-out to its
+        // tail later (residual case) or it may participate in a meeting crossfade.
+        for f in 0..pre_end {
+            for c in 0..channels {
+                mix[f * channels + c] = stretched_pre[f * channels + c];
+            }
+        }
+
+        if meets {
+            // Equal-power crossfade in the overlap region [post_start, pre_end).
+            // post_start <= pre_end here by construction.
+            let overlap_n = pre_end - post_start;
+            if overlap_n > 0 {
+                for k in 0..overlap_n {
+                    let mix_idx = post_start + k;
+                    let t = (k as f32 + 0.5) / overlap_n as f32;
+                    let cos_g = ((1.0 - t) * std::f32::consts::FRAC_PI_2).sin();
+                    let sin_g = (t * std::f32::consts::FRAC_PI_2).sin();
+                    for c in 0..channels {
+                        let pre_v = mix[mix_idx * channels + c];
+                        let post_v = stretched_post[k * channels + c];
+                        mix[mix_idx * channels + c] = pre_v * cos_g + post_v * sin_g;
+                    }
+                }
+            }
+            // Tail of stretched_post past the overlap is plain copy.
+            for k in overlap_n..stretched_post_n {
+                let mix_idx = post_start + k;
+                if mix_idx >= zone_n {
+                    break;
+                }
+                for c in 0..channels {
+                    mix[mix_idx * channels + c] = stretched_post[k * channels + c];
+                }
+            }
+        } else {
+            // Residual silence in the middle: apply soft fade-out to the last
+            // `fade_n` frames of stretched_pre's region and a soft fade-in to the
+            // first `fade_n` frames of stretched_post's region. Clamp so the fade
+            // fits within each stretched buffer.
+            let fade_n = silence_fade_n.min(pre_end).min(stretched_post_n);
+
+            if fade_n > 0 {
+                // Fade-out on tail of stretched_pre.
+                for k in 0..fade_n {
+                    let mix_idx = pre_end - fade_n + k;
+                    let t = (k as f32 + 0.5) / fade_n as f32;
+                    let cos_g = ((1.0 - t) * std::f32::consts::FRAC_PI_2).sin();
+                    for c in 0..channels {
+                        mix[mix_idx * channels + c] *= cos_g;
+                    }
+                }
+            }
+
+            // Copy stretched_post into mix[post_start..], with fade-in applied to
+            // its first `fade_n` frames. Equal-power sin pair with the cos
+            // fade-out above — together they form the canonical sin/cos
+            // crossfade-around-silence (time-symmetric: reversing the audio
+            // turns one into the other).
+            for k in 0..stretched_post_n {
+                let mix_idx = post_start + k;
+                if mix_idx >= zone_n {
+                    break;
+                }
+                let gain = if k < fade_n {
+                    let t = (k as f32 + 0.5) / fade_n as f32;
+                    (t * std::f32::consts::FRAC_PI_2).sin()
+                } else {
+                    1.0
+                };
+                for c in 0..channels {
+                    mix[mix_idx * channels + c] = stretched_post[k * channels + c] * gain;
+                }
+            }
+        }
+
+        // ── Write into out[] with replace-then-crossfade-at-edges ──────────────
+        //
+        // The zone is [zone_start_frame, zone_start_frame + zone_n). At the left
+        // edge we crossfade from existing out[] (which contains segs[i] at full
+        // amplitude past its own fade-in) into mix. At the right edge we crossfade
+        // from mix back into existing out[] (segs[i+1] at full amplitude before its
+        // own fade-out). In the bulk we replace.
+        let zone_start_s = gap_start_s - src_pre_s;
+        let zone_start_frame = (zone_start_s * sr).round() as i64;
 
         tracing::info!(
             track = track_id,
             boundary = i,
             gap_master_s = format!("[{:.3}, {:.3}]", gap_start_s, gap_end_s),
             gap_s = format!("{:.3}", gap_s),
-            stretched_frames = zone_frames,
+            stretched_pre_s = format!("{:.3}", stretched_pre_n as f64 / sr),
+            stretched_post_s = format!("{:.3}", stretched_post_n as f64 / sr),
+            meets,
             "gap-fill: stretched neighbour audio into gap"
         );
 
-        for f in 0..zone_frames {
-            let dst_frame = zone_start + f as i64;
-            if dst_frame < 0 || (dst_frame as usize) >= out.len() / channels {
+        // Edge fades sit fully inside the stretched buffers on each side so they
+        // never reach into the residual-silence middle. Default xfade is 10 ms,
+        // which is < margin in any realistic config, so clamping is just safety.
+        let left_edge = xfade_n.min(stretched_pre_n).min(zone_n / 2);
+        let right_edge = xfade_n.min(stretched_post_n).min(zone_n / 2);
+        for f in 0..zone_n {
+            let dst_frame = zone_start_frame + f as i64;
+            if dst_frame < 0 || (dst_frame as usize) >= total_out_frames {
                 continue;
             }
-            // Equal-power sin crossfade at both ends so the stretched buffer blends
-            // with segs[i]'s fade-out (left) and segs[i+1]'s fade-in (right).
-            let mut gain = 1.0_f32;
-            if xfade > 0 && f < xfade {
-                let t = (f as f32 + 0.5) / xfade as f32;
-                gain *= (t * std::f32::consts::FRAC_PI_2).sin();
-            }
-            if xfade > 0 && zone_frames > xfade && f >= zone_frames - xfade {
-                let pos = zone_frames - 1 - f;
-                let t = (pos as f32 + 0.5) / xfade as f32;
-                gain *= (t * std::f32::consts::FRAC_PI_2).sin();
-            }
-            for c in 0..channels {
-                out[dst_frame as usize * channels + c] += stretched[f * channels + c] * gain;
+            let dst = dst_frame as usize;
+            if left_edge > 0 && f < left_edge {
+                let t = (f as f32 + 0.5) / left_edge as f32;
+                let cos_g = ((1.0 - t) * std::f32::consts::FRAC_PI_2).sin();
+                let sin_g = (t * std::f32::consts::FRAC_PI_2).sin();
+                for c in 0..channels {
+                    let existing = out[dst * channels + c];
+                    let new_v = mix[f * channels + c];
+                    out[dst * channels + c] = existing * cos_g + new_v * sin_g;
+                }
+            } else if right_edge > 0 && f >= zone_n - right_edge {
+                // s = 0 at start of right-edge window, right_edge-1 at last frame.
+                // mix fades 1 → 0, existing (segs[i+1]) fades 0 → 1.
+                let s = f - (zone_n - right_edge);
+                let t = (s as f32 + 0.5) / right_edge as f32;
+                let cos_g = ((1.0 - t) * std::f32::consts::FRAC_PI_2).sin();
+                let sin_g = (t * std::f32::consts::FRAC_PI_2).sin();
+                for c in 0..channels {
+                    let existing = out[dst * channels + c];
+                    let new_v = mix[f * channels + c];
+                    out[dst * channels + c] = new_v * cos_g + existing * sin_g;
+                }
+            } else {
+                for c in 0..channels {
+                    out[dst * channels + c] = mix[f * channels + c];
+                }
             }
         }
     }
@@ -914,6 +1093,300 @@ mod tests {
             (segs[1].master_start_s - 99.990).abs() < 1e-6,
             "segs[1].master_start_s = {}",
             segs[1].master_start_s
+        );
+    }
+
+    /// Defaults aligned with the CLI/`SpliceConfig` defaults so tests construct
+    /// realistic configs without spelling out every field.
+    fn test_splice_cfg() -> SpliceConfig {
+        SpliceConfig {
+            silence_db: -45.0,
+            silence_min_ms: 200,
+            snap_radius_s: 30.0,
+            crossfade_ms: 10,
+            smooth_gaps: true,
+            gap_fill_margin_s: 1.0,
+            speech_db: -25.0,
+            gap_fill_max_ratio: 1.2,
+            gap_fill_silence_fade_ms: 100,
+        }
+    }
+
+    /// Spawn `rubberband --version` to detect whether the binary is on PATH. Tests
+    /// that actually call `stretch_to_duration` short-circuit when this returns
+    /// false so they pass on dev machines without a local rubberband.
+    fn rubberband_available() -> bool {
+        std::process::Command::new("rubberband")
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    /// Build a Pcm + two AdjSegments + an `out[]` rendered via the standard
+    /// pipeline for a synthetic gap. Returns everything fill_gaps needs.
+    ///
+    /// Layout: segs[0] = master [0, gap_start_s] @ offset 0, segs[1] = master
+    /// [gap_end_s, total_s] @ offset -gap_s. Donor occupies enough range to cover
+    /// pre/post margin sampling either side of the gap.
+    fn build_gap_fixture(
+        sr: u32,
+        pre_samples: &[f32],
+        post_samples: &[f32],
+        gap_s: f64,
+    ) -> (Pcm, Vec<AdjSegment>, Vec<f32>) {
+        // Master timeline: 5s segment, 1s gap (configurable), 5s segment.
+        let body_s = 5.0_f64;
+        let total_s = body_s + gap_s + body_s;
+        let gap_start_s = body_s;
+        let gap_end_s = body_s + gap_s;
+        let pre_n = pre_samples.len();
+        let post_n = post_samples.len();
+        // Donor: 5s body up to gap_start, then immediately the post-side body. The
+        // post slice sits at donor_t = gap_end + (-gap_s) = body_s in donor time,
+        // overwriting the same region the pre body owned. To avoid that collision
+        // we use distinct sample positions: pre fills the last `pre_n` samples of
+        // segs[0]'s donor playback, post fills the first `post_n` samples after.
+        let donor_total_n =
+            ((total_s * sr as f64).round() as usize).max(pre_n + post_n + sr as usize);
+        let mut donor = vec![0.0_f32; donor_total_n];
+        // Pre sits at donor [gap_start_s - pre_n/sr, gap_start_s)
+        let pre_donor_start = (gap_start_s * sr as f64).round() as usize - pre_n;
+        donor[pre_donor_start..pre_donor_start + pre_n].copy_from_slice(pre_samples);
+        // Post sits at donor [gap_start_s, gap_start_s + post_n/sr)  (because
+        // segs[1] reads donor at master_t - gap_s = gap_end_s - gap_s = gap_start_s)
+        let post_donor_start = (gap_start_s * sr as f64).round() as usize;
+        let upper = (post_donor_start + post_n).min(donor.len());
+        donor[post_donor_start..upper].copy_from_slice(&post_samples[..upper - post_donor_start]);
+
+        let pcm = pcm_from_mono(donor, sr);
+        let segs = vec![
+            AdjSegment {
+                master_start_s: 0.0,
+                master_end_s: gap_start_s,
+                donor_offset_s: 0.0,
+            },
+            AdjSegment {
+                master_start_s: gap_end_s,
+                master_end_s: total_s,
+                donor_offset_s: -gap_s,
+            },
+        ];
+        let out = render(&pcm, &segs, total_s, 0.0, total_s, 0.010);
+        (pcm, segs, out)
+    }
+
+    /// Compute mean abs amplitude in a master-time window of `out[]`.
+    fn rms_window(out: &[f32], sr: u32, start_s: f64, end_s: f64) -> f32 {
+        let lo = (start_s * sr as f64).round() as usize;
+        let hi = ((end_s * sr as f64).round() as usize).min(out.len());
+        if hi <= lo {
+            return 0.0;
+        }
+        let sum_sq: f64 = out[lo..hi].iter().map(|&s| (s as f64) * (s as f64)).sum();
+        ((sum_sq / (hi - lo) as f64).sqrt()) as f32
+    }
+
+    #[test]
+    fn fill_gaps_speech_in_pre_leaves_silence() {
+        let sr = 16_000u32;
+        let n = sr as usize; // 1 s
+                             // Speech: 200 Hz sine at amplitude 0.1 → RMS ≈ -23 dBFS, ZCR ≈ 0.025 → Speech.
+        let pre: Vec<f32> = (0..n)
+            .map(|i| (2.0 * std::f32::consts::PI * 200.0 * i as f32 / sr as f32).sin() * 0.1)
+            .collect();
+        // Ambient: alternating +/-0.01 → RMS -40 dBFS, ZCR ≈ 1.0 → Ambient.
+        let post: Vec<f32> = (0..n)
+            .map(|i| if i % 2 == 0 { 0.01 } else { -0.01 })
+            .collect();
+        let (pcm, segs, mut out) = build_gap_fixture(sr, &pre, &post, 0.5);
+        let cfg = test_splice_cfg();
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let total_s = 5.0 + 0.5 + 5.0;
+        fill_gaps(
+            &mut out,
+            &pcm,
+            &segs,
+            total_s,
+            0.0,
+            total_s,
+            &cfg,
+            workspace.path(),
+            0,
+        );
+        // Gap [5.0, 5.5] should remain digital zero — speech protection refuses
+        // to stretch, leaving the rendered silence intact.
+        let rms = rms_window(&out, sr, 5.05, 5.45);
+        assert!(rms < 1e-6, "expected silent gap, got RMS={rms}");
+    }
+
+    #[test]
+    fn fill_gaps_speech_in_post_leaves_silence() {
+        let sr = 16_000u32;
+        let n = sr as usize;
+        let pre: Vec<f32> = (0..n)
+            .map(|i| if i % 2 == 0 { 0.01 } else { -0.01 })
+            .collect();
+        let post: Vec<f32> = (0..n)
+            .map(|i| (2.0 * std::f32::consts::PI * 200.0 * i as f32 / sr as f32).sin() * 0.1)
+            .collect();
+        let (pcm, segs, mut out) = build_gap_fixture(sr, &pre, &post, 0.5);
+        let cfg = test_splice_cfg();
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let total_s = 5.0 + 0.5 + 5.0;
+        fill_gaps(
+            &mut out,
+            &pcm,
+            &segs,
+            total_s,
+            0.0,
+            total_s,
+            &cfg,
+            workspace.path(),
+            0,
+        );
+        let rms = rms_window(&out, sr, 5.05, 5.45);
+        assert!(rms < 1e-6, "expected silent gap, got RMS={rms}");
+    }
+
+    #[test]
+    fn fill_gaps_digital_zero_short_circuits() {
+        let sr = 16_000u32;
+        let n = sr as usize;
+        let pre = vec![0.0_f32; n];
+        let post = vec![0.0_f32; n];
+        let (pcm, segs, mut out) = build_gap_fixture(sr, &pre, &post, 0.5);
+        let cfg = test_splice_cfg();
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let total_s = 5.0 + 0.5 + 5.0;
+        fill_gaps(
+            &mut out,
+            &pcm,
+            &segs,
+            total_s,
+            0.0,
+            total_s,
+            &cfg,
+            workspace.path(),
+            0,
+        );
+        // Both neighbours are digital zero → fill_gaps must skip. No rubberband
+        // invoked (verifies the early return path works without the binary).
+        let rms = rms_window(&out, sr, 5.05, 5.45);
+        assert!(rms < 1e-6, "expected silent gap, got RMS={rms}");
+    }
+
+    #[test]
+    fn fill_gaps_zero_margin_returns_immediately() {
+        let sr = 16_000u32;
+        let n = sr as usize;
+        let pre: Vec<f32> = (0..n)
+            .map(|i| if i % 2 == 0 { 0.01 } else { -0.01 })
+            .collect();
+        let post = pre.clone();
+        let (pcm, segs, mut out) = build_gap_fixture(sr, &pre, &post, 0.5);
+        let mut cfg = test_splice_cfg();
+        cfg.gap_fill_margin_s = 0.0;
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let total_s = 5.0 + 0.5 + 5.0;
+        let snapshot = out.clone();
+        fill_gaps(
+            &mut out,
+            &pcm,
+            &segs,
+            total_s,
+            0.0,
+            total_s,
+            &cfg,
+            workspace.path(),
+            0,
+        );
+        assert_eq!(out, snapshot, "fill_gaps with margin=0 must be a no-op");
+    }
+
+    #[test]
+    fn fill_gaps_ambient_neighbours_writes_into_gap() {
+        if !rubberband_available() {
+            eprintln!("skipping: rubberband not in PATH");
+            return;
+        }
+        let sr = 16_000u32;
+        let n = sr as usize;
+        // Constant low-amplitude alternating signal → broadband Ambient.
+        let pre: Vec<f32> = (0..n)
+            .map(|i| if i % 2 == 0 { 0.02 } else { -0.02 })
+            .collect();
+        let post = pre.clone();
+        let (pcm, segs, mut out) = build_gap_fixture(sr, &pre, &post, 0.3);
+        let cfg = test_splice_cfg();
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let total_s = 5.0 + 0.3 + 5.0;
+        fill_gaps(
+            &mut out,
+            &pcm,
+            &segs,
+            total_s,
+            0.0,
+            total_s,
+            &cfg,
+            workspace.path(),
+            0,
+        );
+        // gap=0.3 < 2*M*(R-1)=0.4 → full coverage path. Gap region (excluding
+        // tiny xfade edges) must contain stretched content.
+        let rms = rms_window(&out, sr, 5.05, 5.25);
+        assert!(
+            rms > 1e-3,
+            "expected stretched content in gap, got RMS={rms}"
+        );
+    }
+
+    #[test]
+    fn fill_gaps_ratio_cap_leaves_residual_middle() {
+        if !rubberband_available() {
+            eprintln!("skipping: rubberband not in PATH");
+            return;
+        }
+        let sr = 16_000u32;
+        let margin_n = sr as usize; // 1 s margin
+                                    // Wide ambient buffer either side.
+        let pre: Vec<f32> = (0..margin_n)
+            .map(|i| if i % 2 == 0 { 0.02 } else { -0.02 })
+            .collect();
+        let post = pre.clone();
+        // gap = 1.0 s > 2*M*(R-1) = 0.4 s coverage → 0.6 s residual silence.
+        let gap_s = 1.0;
+        let (pcm, segs, mut out) = build_gap_fixture(sr, &pre, &post, gap_s);
+        let cfg = test_splice_cfg();
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let total_s = 5.0 + gap_s + 5.0;
+        fill_gaps(
+            &mut out,
+            &pcm,
+            &segs,
+            total_s,
+            0.0,
+            total_s,
+            &cfg,
+            workspace.path(),
+            0,
+        );
+        // Just inside the gap, near pre's extension end (gap_start + ~0.15 s):
+        // stretched content should still be present.
+        let rms_pre_ext = rms_window(&out, sr, 5.05, 5.15);
+        assert!(
+            rms_pre_ext > 1e-3,
+            "pre-side extension should have content, got RMS={rms_pre_ext}"
+        );
+        // Middle of the gap (after the fade-out, before fade-in): residual silence.
+        // With ratio cap 1.2 the stretched extensions reach to gap_start+0.2 and
+        // gap_end-0.2; with silence_fade 100 ms the fades occupy
+        // [gap_start+0.1, gap_start+0.2] and [gap_end-0.2, gap_end-0.1]. So the
+        // window [gap_start+0.25, gap_end-0.25] = [5.25, 5.75] must be pure silence.
+        let rms_mid = rms_window(&out, sr, 5.30, 5.70);
+        assert!(
+            rms_mid < 1e-6,
+            "residual middle should be silent, got RMS={rms_mid}"
         );
     }
 

@@ -158,6 +158,33 @@ pub fn draw(ui: &mut egui::Ui, opts: &mut PersistedOptions) {
                     );
                 });
                 ui.horizontal(|ui| {
+                    ui.label("Max stretch ratio");
+                    ui.add(
+                        egui::DragValue::new(&mut opts.gap_fill_max_ratio)
+                            .range(1.0..=2.0)
+                            .speed(0.05),
+                    )
+                    .on_hover_text(
+                        "Hard cap on `target / source` per stretched side. Above 1.5× \
+                         artefacts become audible on melodic content; 1.2× is inaudible \
+                         on ambient/music. If the cap binds before the gap is fully \
+                         covered, residual silence remains in the middle.",
+                    );
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Silence fade (ms)");
+                    ui.add(
+                        egui::DragValue::new(&mut opts.gap_fill_silence_fade_ms)
+                            .range(0..=500)
+                            .speed(5),
+                    )
+                    .on_hover_text(
+                        "Length of the soft fade-out/in at the edges of any residual \
+                         silence in the middle of a gap. Wider = gentler transition \
+                         into silence; 0 reproduces an abrupt drop to zero.",
+                    );
+                });
+                ui.horizontal(|ui| {
                     ui.label("Speech threshold (dBFS)");
                     ui.add(
                         egui::DragValue::new(&mut opts.speech_db)

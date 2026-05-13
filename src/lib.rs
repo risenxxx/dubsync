@@ -223,6 +223,8 @@ pub fn run_pipeline(mut cfg: RunConfig, reporter: &dyn ProgressReporter) -> Resu
         smooth_gaps: cfg.smooth_gaps,
         gap_fill_margin_s: cfg.gap_fill_margin_s,
         speech_db: cfg.speech_db,
+        gap_fill_max_ratio: cfg.gap_fill_max_ratio,
+        gap_fill_silence_fade_ms: cfg.gap_fill_silence_fade_ms,
     };
     let synced = match sync::apply_to_dubs(
         &dubs,

@@ -71,12 +71,16 @@ pub struct PersistedOptions {
     pub snap_radius_s: f32,
     #[serde(default = "default_crossfade_ms")]
     pub crossfade_ms: u32,
-    #[serde(default)]
+    #[serde(default = "default_smooth_gaps")]
     pub smooth_gaps: bool,
     #[serde(default = "default_gap_fill_margin_s")]
     pub gap_fill_margin_s: f32,
     #[serde(default = "default_speech_db")]
     pub speech_db: f32,
+    #[serde(default = "default_gap_fill_max_ratio")]
+    pub gap_fill_max_ratio: f32,
+    #[serde(default = "default_gap_fill_silence_fade_ms")]
+    pub gap_fill_silence_fade_ms: u32,
     #[serde(default)]
     pub pal_pitch_correction: bool,
     #[serde(default)]
@@ -137,11 +141,20 @@ fn default_keep_master_subs() -> bool {
 fn default_crossfade_ms() -> u32 {
     10
 }
+fn default_smooth_gaps() -> bool {
+    true
+}
 fn default_gap_fill_margin_s() -> f32 {
-    0.5
+    1.0
 }
 fn default_speech_db() -> f32 {
     -25.0
+}
+fn default_gap_fill_max_ratio() -> f32 {
+    1.2
+}
+fn default_gap_fill_silence_fade_ms() -> u32 {
+    100
 }
 fn default_max_segment_jump_s() -> f32 {
     10.0
@@ -163,9 +176,11 @@ impl Default for PersistedOptions {
             max_segment_jump_s: default_max_segment_jump_s(),
             snap_radius_s: 30.0,
             crossfade_ms: default_crossfade_ms(),
-            smooth_gaps: false,
+            smooth_gaps: default_smooth_gaps(),
             gap_fill_margin_s: default_gap_fill_margin_s(),
             speech_db: default_speech_db(),
+            gap_fill_max_ratio: default_gap_fill_max_ratio(),
+            gap_fill_silence_fade_ms: default_gap_fill_silence_fade_ms(),
             pal_pitch_correction: false,
             anchor_only_validation: false,
             save_report: false,

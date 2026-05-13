@@ -552,6 +552,8 @@ impl App {
             smooth_gaps: opts.smooth_gaps,
             gap_fill_margin_s: opts.gap_fill_margin_s,
             speech_db: opts.speech_db,
+            gap_fill_max_ratio: opts.gap_fill_max_ratio,
+            gap_fill_silence_fade_ms: opts.gap_fill_silence_fade_ms,
             pal_pitch_correction: opts.pal_pitch_correction,
             anchor_only_validation: opts.anchor_only_validation,
             report_path,

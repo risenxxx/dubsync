@@ -229,22 +229,36 @@ pub struct Cli {
     pub crossfade_ms: u32,
 
     /// Replace literal silence at segment splices with time-stretched ambient copied
-    /// from the neighbouring dub audio (via the bundled `rubberband` CLI). Off by
+    /// from the neighbouring dub audio (via the bundled `rubberband` CLI). On by
     /// default. Speech is never stretched — the splicer falls back to silence if
     /// the neighbour buffer is dominated by dialog.
-    #[arg(long, action = clap::ArgAction::Set, default_value_t = false, value_name = "BOOL")]
+    #[arg(long, action = clap::ArgAction::Set, default_value_t = true, value_name = "BOOL")]
     pub smooth_gaps: bool,
 
     /// Length of dub audio sampled before AND after each gap to use as the stretch
     /// source. Wider = more material to stretch (less artefact), narrower = less
     /// chance of the neighbour catching speech.
-    #[arg(long, default_value_t = 0.5, value_name = "S")]
+    #[arg(long, default_value_t = 1.0, value_name = "S")]
     pub gap_fill_margin_s: f32,
 
     /// Above this dBFS level a neighbour buffer is treated as speech and the
     /// gap-fill path falls back to literal silence (preserving lip-sync).
     #[arg(long, default_value_t = -25.0, value_name = "DBFS")]
     pub speech_db: f32,
+
+    /// Hard cap on the per-side stretch ratio (`target / source`) in the gap-fill
+    /// pass. Each side independently stretches its margin to extend up to `gap/2`
+    /// into the gap, but never above this ratio. Above 1.5× artefacts become
+    /// audible on melodic content; default 1.2× is inaudible on ambient/music.
+    #[arg(long, default_value_t = 1.2, value_name = "RATIO")]
+    pub gap_fill_max_ratio: f32,
+
+    /// Length of the soft fade-in/out applied at the edges of any residual silence
+    /// left in the middle of a gap when the ratio cap prevents full coverage.
+    /// Default 100 ms; range [0, 500]. Wider = gentler transition into silence,
+    /// less "hard cut" feel; 0 reproduces the old abrupt drop to zero.
+    #[arg(long, default_value_t = 100, value_name = "MS")]
+    pub gap_fill_silence_fade_ms: u32,
 
     /// When fps mismatch is auto-corrected, additionally lower the donor's pitch by
     /// `12 * log2(master_fps/donor_fps)` semitones (≈ -0.71 for 25→24) to undo the
@@ -356,6 +370,8 @@ pub struct RunConfig {
     pub smooth_gaps: bool,
     pub gap_fill_margin_s: f32,
     pub speech_db: f32,
+    pub gap_fill_max_ratio: f32,
+    pub gap_fill_silence_fade_ms: u32,
     pub pal_pitch_correction: bool,
     pub anchor_only_validation: bool,
     pub report_path: Option<PathBuf>,

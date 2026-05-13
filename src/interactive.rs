@@ -139,6 +139,8 @@ pub fn run_interactive(defaults: &Cli) -> Result<RunConfig> {
         smooth_gaps: defaults.smooth_gaps,
         gap_fill_margin_s: defaults.gap_fill_margin_s,
         speech_db: defaults.speech_db,
+        gap_fill_max_ratio: defaults.gap_fill_max_ratio,
+        gap_fill_silence_fade_ms: defaults.gap_fill_silence_fade_ms,
         pal_pitch_correction: defaults.pal_pitch_correction,
         anchor_only_validation: defaults.anchor_only_validation,
         report_path: defaults.report.clone(),
@@ -299,6 +301,15 @@ fn print_repeat_command(cfg: &RunConfig) {
     }
     if (cfg.speech_db - defaults.speech_db).abs() > f32::EPSILON {
         parts.push(format!("--speech-db {}", cfg.speech_db));
+    }
+    if (cfg.gap_fill_max_ratio - defaults.gap_fill_max_ratio).abs() > f32::EPSILON {
+        parts.push(format!("--gap-fill-max-ratio {}", cfg.gap_fill_max_ratio));
+    }
+    if cfg.gap_fill_silence_fade_ms != defaults.gap_fill_silence_fade_ms {
+        parts.push(format!(
+            "--gap-fill-silence-fade-ms {}",
+            cfg.gap_fill_silence_fade_ms
+        ));
     }
     if cfg.pal_pitch_correction != defaults.pal_pitch_correction {
         parts.push(format!(
@@ -518,6 +529,9 @@ fn prompt_tuning_group(cfg: &mut RunConfig) -> Result<()> {
     )?;
     if cfg.smooth_gaps {
         cfg.gap_fill_margin_s = prompt_f32("Gap-fill margin (s):", cfg.gap_fill_margin_s)?;
+        cfg.gap_fill_max_ratio = prompt_f32("Gap-fill max stretch ratio:", cfg.gap_fill_max_ratio)?;
+        cfg.gap_fill_silence_fade_ms =
+            prompt_u32("Gap-fill silence fade (ms):", cfg.gap_fill_silence_fade_ms)?;
         cfg.speech_db = prompt_f32("Gap-fill speech threshold (dBFS):", cfg.speech_db)?;
     }
     cfg.silence_db = prompt_f32("Silence threshold (dBFS):", cfg.silence_db)?;

@@ -96,6 +96,8 @@ fn resolve_from_cli(args: Cli) -> Result<RunConfig> {
         smooth_gaps: args.smooth_gaps,
         gap_fill_margin_s: args.gap_fill_margin_s,
         speech_db: args.speech_db,
+        gap_fill_max_ratio: args.gap_fill_max_ratio,
+        gap_fill_silence_fade_ms: args.gap_fill_silence_fade_ms,
         pal_pitch_correction: args.pal_pitch_correction,
         anchor_only_validation: args.anchor_only_validation,
         report_path: args.report,
