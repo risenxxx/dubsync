@@ -87,6 +87,55 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
+      # ─── Toolchain diagnostic + macOS PATH fix ──────────────────────────────
+      # CI started failing on macos-14 with `cargo build` invoking rustup-init
+      # instead of the real cargo (system cargo-shim shadowing the freshly
+      # rustup-installed one). The diagnostic step prints PATH resolution so a
+      # repeat failure on any platform is debuggable from logs alone; the macOS
+      # fix prepends ~/.cargo/bin and pins the default toolchain.
+      - name: Inspect cargo resolution (diagnostic)
+        shell: bash
+        run: |
+          set +e
+          echo "=== runner ==="
+          uname -a
+          echo "=== PATH ==="
+          echo "$PATH" | tr ':' '\n'
+          echo "=== cargo resolution ==="
+          which -a cargo
+          cargo_bin="$(command -v cargo)"
+          if [ -n "$cargo_bin" ]; then
+            ls -la "$cargo_bin" 2>/dev/null
+            file "$cargo_bin" 2>/dev/null || true
+          else
+            echo "no cargo on PATH"
+          fi
+          echo "=== cargo --version ==="
+          cargo --version 2>&1
+          echo "=== rustup --version ==="
+          rustup --version 2>&1
+          echo "=== ~/.cargo/bin ==="
+          if [ -d "$HOME/.cargo/bin" ]; then
+            ls -la "$HOME/.cargo/bin"
+          else
+            echo "no ~/.cargo/bin"
+          fi
+
+      - name: Force rustup-installed cargo on PATH (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # macos-14 image updates have left a stale /usr/local/bin/cargo (or
+          # similar) symlinked to rustup-init, which the default PATH resolves
+          # before ~/.cargo/bin. Prepending via $GITHUB_PATH makes the freshly
+          # installed toolchain shims win for subsequent steps; rustup default
+          # then guarantees a toolchain is actually selected.
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          rustup default stable
+          "$HOME/.cargo/bin/cargo" --version
+          "$HOME/.cargo/bin/rustc" --version
+
       - name: Build release binary
         run: cargo build --release --locked --target ${{ matrix.target }}
 
